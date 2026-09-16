@@ -62,12 +62,26 @@ validate_known_legacy_tuning_file() {
   fi
 }
 
+validate_managed_tuning_file() {
+  local managed_file="$1"
+
+  if [[ -L "${managed_file}" || ( -e "${managed_file}" && ! -f "${managed_file}" ) ]]; then
+    fail "Refusing to overwrite non-regular managed tuning file: ${managed_file}"
+  fi
+}
+
 migrate_known_legacy_tuning_files() {
   local legacy_sysctl_file="$1"
   local legacy_limits_file="$2"
+  local managed_sysctl_file="$3"
+  local managed_limits_file="$4"
 
-  validate_known_legacy_tuning_file "${legacy_sysctl_file}" "${LEGACY_SYSCTL_CONTENT}"
-  validate_known_legacy_tuning_file "${legacy_limits_file}" "${LEGACY_LIMITS_CONTENT}"
+  validate_known_legacy_tuning_file \
+    "${legacy_sysctl_file}" "${LEGACY_SYSCTL_CONTENT}" || return 1
+  validate_known_legacy_tuning_file \
+    "${legacy_limits_file}" "${LEGACY_LIMITS_CONTENT}" || return 1
+  validate_managed_tuning_file "${managed_sysctl_file}" || return 1
+  validate_managed_tuning_file "${managed_limits_file}" || return 1
 
   if [[ -e "${legacy_sysctl_file}" ]]; then
     rm -- "${legacy_sysctl_file}"
@@ -81,10 +95,7 @@ write_managed_tuning_file() {
   local managed_file="$1"
   local content="$2"
 
-  if [[ -L "${managed_file}" || ( -e "${managed_file}" && ! -f "${managed_file}" ) ]]; then
-    fail "Refusing to overwrite non-regular managed tuning file: ${managed_file}"
-  fi
-
+  validate_managed_tuning_file "${managed_file}" || return 1
   printf '%s\n' "${content}" >"${managed_file}"
 }
 
@@ -99,7 +110,11 @@ main() {
     exit 1
   fi
 
-  migrate_known_legacy_tuning_files "${LEGACY_SYSCTL_FILE}" "${LEGACY_LIMITS_FILE}"
+  migrate_known_legacy_tuning_files \
+    "${LEGACY_SYSCTL_FILE}" \
+    "${LEGACY_LIMITS_FILE}" \
+    "${SYSCTL_FILE}" \
+    "${LIMITS_FILE}"
   write_managed_tuning_file "${SYSCTL_FILE}" "${SYSCTL_CONTENT}"
   write_managed_tuning_file "${LIMITS_FILE}" "${LIMITS_CONTENT}"
 

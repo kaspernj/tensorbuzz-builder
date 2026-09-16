@@ -96,6 +96,8 @@ function runLegacyTuningMigration(sysctlContent, limitsContent) {
   const limitsDirectory = path.join(fixtureDirectory, "limits.d")
   const sysctlFile = path.join(sysctlDirectory, "99-peakflow-builder.conf")
   const limitsFile = path.join(limitsDirectory, "99-peakflow-builder.conf")
+  const managedSysctlFile = path.join(sysctlDirectory, "99-tensorbuzz-builder.conf")
+  const managedLimitsFile = path.join(limitsDirectory, "99-tensorbuzz-builder.conf")
 
   fs.mkdirSync(sysctlDirectory)
   fs.mkdirSync(limitsDirectory)
@@ -107,11 +109,13 @@ function runLegacyTuningMigration(sysctlContent, limitsContent) {
     "bash",
     [
       "-c",
-      'source "$1"; migrate_known_legacy_tuning_files "$2" "$3"',
+      'source "$1"; migrate_known_legacy_tuning_files "$2" "$3" "$4" "$5"',
       "host-tuning-migration-test",
       script,
       sysctlFile,
-      limitsFile
+      limitsFile,
+      managedSysctlFile,
+      managedLimitsFile
     ],
     {encoding: "utf8"}
   )
@@ -121,6 +125,67 @@ function runLegacyTuningMigration(sysctlContent, limitsContent) {
     limitsFile,
     result,
     sysctlFile
+  }
+}
+
+function runHostTuningPreparation(unsafeCanonical) {
+  const fixtureDirectory = fs.mkdtempSync(path.join(repoRoot, "tests", "fixtures", "host-tuning-"))
+  const sysctlDirectory = path.join(fixtureDirectory, "sysctl.d")
+  const limitsDirectory = path.join(fixtureDirectory, "limits.d")
+  const legacySysctlFile = path.join(sysctlDirectory, "99-peakflow-builder.conf")
+  const legacyLimitsFile = path.join(limitsDirectory, "99-peakflow-builder.conf")
+  const managedSysctlFile = path.join(sysctlDirectory, "99-tensorbuzz-builder.conf")
+  const managedLimitsFile = path.join(limitsDirectory, "99-tensorbuzz-builder.conf")
+  const unsafeTarget = path.join(fixtureDirectory, "unsafe-target.conf")
+  const originalSysctlContent = "locally managed canonical sysctl content\n"
+  const originalLimitsContent = "locally managed canonical limits content\n"
+
+  fs.mkdirSync(sysctlDirectory)
+  fs.mkdirSync(limitsDirectory)
+  fs.writeFileSync(legacySysctlFile, legacySysctlContent)
+  fs.writeFileSync(legacyLimitsFile, legacyLimitsContent)
+  fs.writeFileSync(unsafeTarget, unsafeCanonical === "sysctl"
+    ? originalSysctlContent
+    : originalLimitsContent)
+
+  if (unsafeCanonical === "sysctl") {
+    fs.symlinkSync(unsafeTarget, managedSysctlFile)
+    fs.writeFileSync(managedLimitsFile, originalLimitsContent)
+  } else {
+    fs.writeFileSync(managedSysctlFile, originalSysctlContent)
+    fs.symlinkSync(unsafeTarget, managedLimitsFile)
+  }
+
+  const script = path.join(repoRoot, "scripts", "prepare-docker-server-host.sh")
+  const result = spawnSync(
+    "bash",
+    [
+      "-c",
+      [
+        'source "$1"',
+        'migrate_known_legacy_tuning_files "$2" "$3" "$4" "$5"',
+        'write_managed_tuning_file "$4" "$SYSCTL_CONTENT"',
+        'write_managed_tuning_file "$5" "$LIMITS_CONTENT"'
+      ].join(" && "),
+      "host-tuning-preflight-test",
+      script,
+      legacySysctlFile,
+      legacyLimitsFile,
+      managedSysctlFile,
+      managedLimitsFile
+    ],
+    {encoding: "utf8"}
+  )
+
+  return {
+    cleanup: () => fs.rmSync(fixtureDirectory, {force: true, recursive: true}),
+    legacyLimitsFile,
+    legacySysctlFile,
+    managedLimitsFile,
+    managedSysctlFile,
+    originalLimitsContent,
+    originalSysctlContent,
+    result
   }
 }
 
@@ -213,6 +278,25 @@ describe("tensorbuzz-builder identity and runtime compatibility", () => {
       expect(fs.existsSync(modified.limitsFile)).toBeTrue()
     } finally {
       modified.cleanup()
+    }
+  })
+
+  it("preflights both canonical tuning destinations before migration or writes", () => {
+    for (const unsafeCanonical of ["limits", "sysctl"]) {
+      const preparation = runHostTuningPreparation(unsafeCanonical)
+
+      try {
+        expect(preparation.result.status).toBe(1)
+        expect(preparation.result.stderr).toContain("non-regular managed tuning file")
+        expect(fs.existsSync(preparation.legacySysctlFile)).toBeTrue()
+        expect(fs.existsSync(preparation.legacyLimitsFile)).toBeTrue()
+        expect(fs.readFileSync(preparation.managedSysctlFile, "utf8"))
+          .toBe(preparation.originalSysctlContent)
+        expect(fs.readFileSync(preparation.managedLimitsFile, "utf8"))
+          .toBe(preparation.originalLimitsContent)
+      } finally {
+        preparation.cleanup()
+      }
     }
   })
 })
