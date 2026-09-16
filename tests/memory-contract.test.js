@@ -1,4 +1,4 @@
-import {execFileSync} from "node:child_process"
+import {execFileSync, spawnSync} from "node:child_process"
 import fs from "node:fs"
 import path from "node:path"
 import {fileURLToPath} from "node:url"
@@ -7,8 +7,32 @@ import {describe, expect, it} from "@velocious/testing"
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const gibibyte = 1024 ** 3
-const composeFiles = ["docker-compose.yml", "docker-compose.socketduct.yml"]
-const emptyEnvFile = path.join("tests", "fixtures", "empty.env")
+const composeFiles = [
+  "docker-compose.yml",
+  "docker-compose.network-name.yml",
+  "docker-compose.socketduct.yml"
+]
+const emptyEnvFile = path.join(repoRoot, "tests", "fixtures", "empty.env")
+const testComposeProjectName = "tensorbuzz-builder-memory-contract-test"
+
+const legacySysctlContent = `# Peakflow builder host tuning for a process-heavy Docker-in-Docker service.
+fs.file-max = 2097152
+fs.inotify.max_user_instances = 1024
+fs.inotify.max_user_watches = 1048576
+kernel.pid_max = 4194304
+vm.max_map_count = 262144
+`
+
+const legacyLimitsContent = `# Raise login-session limits so large container ulimits are not blocked by the host.
+* soft nofile 262144
+* hard nofile 524288
+* soft nproc 65535
+* hard nproc 65535
+root soft nofile 262144
+root hard nofile 524288
+root soft nproc 65535
+root hard nproc 65535
+`
 
 function composeInterpolationVariables() {
   const variables = new Set(["COMPOSE_FILE", "COMPOSE_PROFILES", "COMPOSE_PROJECT_NAME"])
@@ -24,19 +48,28 @@ function composeInterpolationVariables() {
   return variables
 }
 
-function renderCompose({inheritedEnvironment = {}, memoryLimit, socketduct = false} = {}) {
-  const args = [
-    "compose",
-    "--project-name",
-    "peakflow-builder-memory-contract-test",
+function renderCompose({
+  composeEnvironment = {},
+  inheritedEnvironment = {},
+  memoryLimit,
+  projectDirectory,
+  projectName = testComposeProjectName,
+  socketduct = false
+} = {}) {
+  const args = ["compose"]
+
+  if (projectName) args.push("--project-name", projectName)
+  if (projectDirectory) args.push("--project-directory", projectDirectory)
+
+  args.push(
     "--env-file",
     emptyEnvFile,
     "--file",
-    "docker-compose.yml"
-  ]
+    path.join(repoRoot, "docker-compose.yml")
+  )
 
   if (socketduct) {
-    args.push("--file", "docker-compose.socketduct.yml")
+    args.push("--file", path.join(repoRoot, "docker-compose.socketduct.yml"))
   }
 
   args.push("config", "--format", "json")
@@ -46,6 +79,7 @@ function renderCompose({inheritedEnvironment = {}, memoryLimit, socketduct = fal
     delete env[key]
   }
 
+  Object.assign(env, composeEnvironment)
   if (memoryLimit) env.DOCKER_SERVER_MEMORY_LIMIT = memoryLimit
 
   return JSON.parse(execFileSync("docker", args, {
@@ -54,6 +88,105 @@ function renderCompose({inheritedEnvironment = {}, memoryLimit, socketduct = fal
     env,
     stdio: ["ignore", "pipe", "pipe"]
   }))
+}
+
+function runLegacyTuningMigration(sysctlContent, limitsContent) {
+  const fixtureDirectory = fs.mkdtempSync(path.join(repoRoot, "tests", "fixtures", "host-tuning-"))
+  const sysctlDirectory = path.join(fixtureDirectory, "sysctl.d")
+  const limitsDirectory = path.join(fixtureDirectory, "limits.d")
+  const sysctlFile = path.join(sysctlDirectory, "99-peakflow-builder.conf")
+  const limitsFile = path.join(limitsDirectory, "99-peakflow-builder.conf")
+  const managedSysctlFile = path.join(sysctlDirectory, "99-tensorbuzz-builder.conf")
+  const managedLimitsFile = path.join(limitsDirectory, "99-tensorbuzz-builder.conf")
+
+  fs.mkdirSync(sysctlDirectory)
+  fs.mkdirSync(limitsDirectory)
+  fs.writeFileSync(sysctlFile, sysctlContent)
+  fs.writeFileSync(limitsFile, limitsContent)
+
+  const script = path.join(repoRoot, "scripts", "prepare-docker-server-host.sh")
+  const result = spawnSync(
+    "bash",
+    [
+      "-c",
+      'source "$1"; migrate_known_legacy_tuning_files "$2" "$3" "$4" "$5"',
+      "host-tuning-migration-test",
+      script,
+      sysctlFile,
+      limitsFile,
+      managedSysctlFile,
+      managedLimitsFile
+    ],
+    {encoding: "utf8"}
+  )
+
+  return {
+    cleanup: () => fs.rmSync(fixtureDirectory, {force: true, recursive: true}),
+    limitsFile,
+    result,
+    sysctlFile
+  }
+}
+
+function runHostTuningPreparation(unsafeCanonical) {
+  const fixtureDirectory = fs.mkdtempSync(path.join(repoRoot, "tests", "fixtures", "host-tuning-"))
+  const sysctlDirectory = path.join(fixtureDirectory, "sysctl.d")
+  const limitsDirectory = path.join(fixtureDirectory, "limits.d")
+  const legacySysctlFile = path.join(sysctlDirectory, "99-peakflow-builder.conf")
+  const legacyLimitsFile = path.join(limitsDirectory, "99-peakflow-builder.conf")
+  const managedSysctlFile = path.join(sysctlDirectory, "99-tensorbuzz-builder.conf")
+  const managedLimitsFile = path.join(limitsDirectory, "99-tensorbuzz-builder.conf")
+  const unsafeTarget = path.join(fixtureDirectory, "unsafe-target.conf")
+  const originalSysctlContent = "locally managed canonical sysctl content\n"
+  const originalLimitsContent = "locally managed canonical limits content\n"
+
+  fs.mkdirSync(sysctlDirectory)
+  fs.mkdirSync(limitsDirectory)
+  fs.writeFileSync(legacySysctlFile, legacySysctlContent)
+  fs.writeFileSync(legacyLimitsFile, legacyLimitsContent)
+  fs.writeFileSync(unsafeTarget, unsafeCanonical === "sysctl"
+    ? originalSysctlContent
+    : originalLimitsContent)
+
+  if (unsafeCanonical === "sysctl") {
+    fs.symlinkSync(unsafeTarget, managedSysctlFile)
+    fs.writeFileSync(managedLimitsFile, originalLimitsContent)
+  } else {
+    fs.writeFileSync(managedSysctlFile, originalSysctlContent)
+    fs.symlinkSync(unsafeTarget, managedLimitsFile)
+  }
+
+  const script = path.join(repoRoot, "scripts", "prepare-docker-server-host.sh")
+  const result = spawnSync(
+    "bash",
+    [
+      "-c",
+      [
+        'source "$1"',
+        'migrate_known_legacy_tuning_files "$2" "$3" "$4" "$5"',
+        'write_managed_tuning_file "$4" "$SYSCTL_CONTENT"',
+        'write_managed_tuning_file "$5" "$LIMITS_CONTENT"'
+      ].join(" && "),
+      "host-tuning-preflight-test",
+      script,
+      legacySysctlFile,
+      legacyLimitsFile,
+      managedSysctlFile,
+      managedLimitsFile
+    ],
+    {encoding: "utf8"}
+  )
+
+  return {
+    cleanup: () => fs.rmSync(fixtureDirectory, {force: true, recursive: true}),
+    legacyLimitsFile,
+    legacySysctlFile,
+    managedLimitsFile,
+    managedSysctlFile,
+    originalLimitsContent,
+    originalSysctlContent,
+    result
+  }
 }
 
 function dockerServer(config) {
@@ -66,6 +199,107 @@ function expectContainedParent(service, expectedBytes) {
   expect(service.privileged).toBeTrue()
   expect(Number(service.shm_size)).toBe(2 * gibibyte)
 }
+
+describe("tensorbuzz-builder identity and runtime compatibility", () => {
+  it("uses the canonical package name and test-only Compose identity", () => {
+    const packageManifest = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"))
+    const packageLock = JSON.parse(fs.readFileSync(path.join(repoRoot, "package-lock.json"), "utf8"))
+    const config = renderCompose()
+
+    expect(packageManifest.name).toBe("tensorbuzz-builder")
+    expect(packageManifest.private).toBeTrue()
+    expect(packageLock.name).toBe("tensorbuzz-builder")
+    expect(packageLock.packages[""].name).toBe("tensorbuzz-builder")
+    expect(config.name).toBe(testComposeProjectName)
+  })
+
+  it("pins the production default independently of the checkout basename", () => {
+    const config = renderCompose({
+      projectDirectory: path.join(repoRoot, "tests", "fixtures"),
+      projectName: null
+    })
+
+    expect(config.name).toBe("peakflow_builder")
+    expect(config.services["docker-server"].networks["peakflow-builder"]).toBeDefined()
+    expect(config.networks["peakflow-builder"].name).toBe("peakflow_builder_peakflow-builder")
+    expect(`${config.name}-docker-server-1`).toBe("peakflow_builder-docker-server-1")
+  })
+
+  it("allows an explicit operator project-name override", () => {
+    const config = renderCompose({
+      composeEnvironment: {COMPOSE_PROJECT_NAME: "operator-approved-builder"},
+      projectDirectory: path.join(repoRoot, "tests", "fixtures"),
+      projectName: null
+    })
+
+    expect(config.name).toBe("operator-approved-builder")
+    expect(config.networks["peakflow-builder"].name).toBe("operator-approved-builder_peakflow-builder")
+  })
+
+  it("documents the exact legacy runtime compatibility allowlist", () => {
+    const documentation = fs.readFileSync(
+      path.join(repoRoot, "docs", "naming-and-runtime-compatibility.md"),
+      "utf8"
+    )
+
+    for (const legacyIdentifier of [
+      "peakflow_builder",
+      "docker-server",
+      "peakflow_builder-docker-server-1",
+      "peakflow-builder",
+      "peakflow_builder_peakflow-builder",
+      "/etc/sysctl.d/99-peakflow-builder.conf",
+      "/etc/security/limits.d/99-peakflow-builder.conf"
+    ]) {
+      expect(documentation).toContain(legacyIdentifier)
+    }
+  })
+
+  it("migrates exact known tuning files but leaves modified legacy files untouched", () => {
+    const known = runLegacyTuningMigration(legacySysctlContent, legacyLimitsContent)
+
+    try {
+      expect(known.result.status).toBe(0)
+      expect(fs.existsSync(known.sysctlFile)).toBeFalse()
+      expect(fs.existsSync(known.limitsFile)).toBeFalse()
+    } finally {
+      known.cleanup()
+    }
+
+    const modified = runLegacyTuningMigration(
+      legacySysctlContent,
+      `${legacyLimitsContent}# local change\n`
+    )
+
+    try {
+      expect(modified.result.status).toBe(1)
+      expect(modified.result.stderr).toContain("modified or unknown legacy tuning file")
+      expect(fs.existsSync(modified.sysctlFile)).toBeTrue()
+      expect(fs.existsSync(modified.limitsFile)).toBeTrue()
+    } finally {
+      modified.cleanup()
+    }
+  })
+
+  it("preflights both canonical tuning destinations before migration or writes", () => {
+    for (const unsafeCanonical of ["limits", "sysctl"]) {
+      const preparation = runHostTuningPreparation(unsafeCanonical)
+
+      try {
+        expect(preparation.result.status).toBe(1)
+        expect(preparation.result.stderr).toContain("non-regular managed tuning file")
+        expect(fs.existsSync(preparation.legacySysctlFile)).toBeTrue()
+        expect(fs.existsSync(preparation.legacyLimitsFile)).toBeTrue()
+        expect(fs.readFileSync(preparation.managedSysctlFile, "utf8"))
+          .toBe(preparation.originalSysctlContent)
+        expect(fs.readFileSync(preparation.managedLimitsFile, "utf8"))
+          .toBe(preparation.originalLimitsContent)
+      } finally {
+        preparation.cleanup()
+      }
+    }
+  })
+})
 
 describe("docker-server memory containment", () => {
   it("reserves 16 GiB for admitted work and 4 GiB for DinD overhead", () => {
