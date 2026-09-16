@@ -1,5 +1,5 @@
 {
-  "name": "peakflow-builder",
+  "name": "tensorbuzz-builder",
   "private": true,
   "type": "module",
   "scripts": {
@@ -7,6 +7,6 @@
     "lint": "node --check tests/memory-contract.test.js"
   },
   "devDependencies": {
-    "@velocious/testing": "0.0.12"
+    "@velocious/testing": "0.0.14"
   }
 }

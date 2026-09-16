@@ -20,7 +20,7 @@ builds:
       - shellcheck scripts/*.sh
       - docker compose --env-file .env.example config --quiet
       - COMPOSE_FILE=docker-compose.yml:docker-compose.socketduct.yml docker compose --env-file .env.example config --quiet
-      - BUILDER_NETWORK_NAME=portable-builder-net COMPOSE_FILE=docker-compose.yml:docker-compose.network-name.yml docker compose --env-file .env.example config --quiet
+      - BUILDER_NETWORK_NAME=tensorbuzz-builder-net COMPOSE_FILE=docker-compose.yml:docker-compose.network-name.yml docker compose --env-file .env.example config --quiet
       - |
         docker compose --env-file .env.example config --format json |
           jq -e --rawfile compose docker-compose.yml '
@@ -46,7 +46,8 @@ builds:
             .services["docker-server"] as $service
             | .services["registry-cache"] as $cache
             | .networks["peakflow-builder"] as $network
-            | $network.name == (.name + "_peakflow-builder")
+            | .name == "peakflow_builder"
+              and $network.name == "peakflow_builder_peakflow-builder"
               and $network.ipam.config[0].subnet == "58.0.0.0/24"
               and $service.networks["peakflow-builder"].ipv4_address == "58.0.0.2"
               and $cache.networks["peakflow-builder"].ipv4_address == "58.0.0.3"
@@ -82,7 +83,8 @@ builds:
             .services["docker-server"] as $service
             | .services["registry-cache"] as $cache
             | .networks["peakflow-builder"] as $network
-            | $network.name == (.name + "_peakflow-builder")
+            | .name == "peakflow_builder"
+              and $network.name == "peakflow_builder_peakflow-builder"
               and $network.ipam.config[0].subnet == "58.0.0.0/24"
               and $service.networks["peakflow-builder"].ipv4_address == "58.0.0.2"
               and $cache.networks["peakflow-builder"].ipv4_address == "58.0.0.3"
@@ -113,7 +115,7 @@ builds:
               and .networks["peakflow-builder"].name == "upgrade-project_peakflow-builder"
           '
       - |
-        export BUILDER_NETWORK_NAME=portable-builder-net
+        export BUILDER_NETWORK_NAME=tensorbuzz-builder-net
         export BUILDER_NETWORK_SUBNET=172.30.44.0/24
         export DOCKER_SERVER_IPV4_ADDRESS=172.30.44.10
         export REGISTRY_CACHE_IPV4_ADDRESS=172.30.44.20
@@ -136,8 +138,8 @@ builds:
           | $socketduct.services["docker-server"] as $socketduct_docker
           | $base.services["registry-cache"] as $base_cache
           | $socketduct.services["registry-cache"] as $socketduct_cache
-          | $base.networks["peakflow-builder"].name == "portable-builder-net"
-            and $socketduct.networks["peakflow-builder"].name == "portable-builder-net"
+          | $base.networks["peakflow-builder"].name == "tensorbuzz-builder-net"
+            and $socketduct.networks["peakflow-builder"].name == "tensorbuzz-builder-net"
             and $base.networks["peakflow-builder"].ipam.config[0].subnet == "172.30.44.0/24"
             and $socketduct.networks["peakflow-builder"].ipam.config[0].subnet == "172.30.44.0/24"
             and $base_docker.networks["peakflow-builder"].ipv4_address == "172.30.44.10"

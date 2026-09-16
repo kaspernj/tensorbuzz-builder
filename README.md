@@ -1,6 +1,10 @@
-# Peakflow Builder
+# TensorBuzz Builder
 
-Docker Compose setup for a Peakflow Docker build server.
+Docker Compose setup for the TensorBuzz Docker build server.
+
+The source and product name is `tensorbuzz-builder`. Existing runtime names are
+intentionally retained for in-place compatibility; see
+[Naming and runtime compatibility](docs/naming-and-runtime-compatibility.md).
 
 ## Topology configuration
 
@@ -10,7 +14,7 @@ particular physical network or machine is required:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `COMPOSE_PROJECT_NAME` | repository directory name | Compose project prefix, including for the default Docker network name |
+| `COMPOSE_PROJECT_NAME` | `peakflow_builder` | Optional explicit operator override of the compatibility-preserving Compose project prefix |
 | `BUILDER_NETWORK_NAME` | unset | Exact Docker network name when `docker-compose.network-name.yml` is selected |
 | `BUILDER_NETWORK_SUBNET` | `58.0.0.0/24` | Non-overlapping subnet assigned to that network |
 | `DOCKER_SERVER_IPV4_ADDRESS` | `58.0.0.2` | `docker-server` address inside the subnet |
@@ -31,20 +35,22 @@ that does not overlap host routes or other Docker networks.
 `docker-server`, `registry-cache`, and `peakflow-builder` remain stable logical
 Compose identifiers because the override, service DNS, profile, and network
 attachments use them as application contracts. They are not physical machine or
-network names. By default, Compose preserves the pre-existing project-scoped
-network identity, `<project>_peakflow-builder`; `<project>` comes from the
-repository directory unless `COMPOSE_PROJECT_NAME` is set. This lets an upgrade
-reuse its existing network without first tearing it down.
+network names. The checked-in Compose default explicitly keeps the legacy
+`peakflow_builder` project, regardless of checkout directory name, so the parent
+container remains `peakflow_builder-docker-server-1` and the default network
+remains `peakflow_builder_peakflow-builder`. An operator can still set
+`COMPOSE_PROJECT_NAME` explicitly, but this rename rollout does not use that
+override.
 
 To assign an exact arbitrary Docker network name instead, add the tracked
 exact-name override to the persisted mode and set `BUILDER_NETWORK_NAME`:
 
 ```env
 COMPOSE_FILE=docker-compose.yml:docker-compose.network-name.yml
-BUILDER_NETWORK_NAME=portable-builder-net
+BUILDER_NETWORK_NAME=tensorbuzz-builder-net
 ```
 
-`portable-builder-net` is only an example. Use `registry-cache` as
+`tensorbuzz-builder-net` is only an example. Use `registry-cache` as
 `REGISTRY_CACHE_HOST` only when the local cache profile is enabled; otherwise
 provide a resolvable external hostname or address.
 
@@ -125,7 +131,7 @@ overrides and set the name explicitly:
 
 ```env
 COMPOSE_FILE=docker-compose.yml:docker-compose.socketduct.yml:docker-compose.network-name.yml
-BUILDER_NETWORK_NAME=portable-builder-net
+BUILDER_NETWORK_NAME=tensorbuzz-builder-net
 ```
 
 Then use the same start command:
