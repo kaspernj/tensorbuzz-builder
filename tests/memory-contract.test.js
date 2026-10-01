@@ -343,3 +343,81 @@ describe("docker-server memory containment", () => {
     expect(mountsByTarget.get("/etc/docker/certs.d").read_only).toBeTrue()
   })
 })
+
+function sourcePrepareScriptVariables() {
+  const script = path.join(repoRoot, "scripts", "prepare-docker-server-host.sh")
+  const result = spawnSync(
+    "bash",
+    ["-c", 'source "$1" && printf "%s\\n" "$SYSCTL_CONTENT" "$CORE_CLEANUP_CRON_CONTENT"', "prepare-content-test", script],
+    {encoding: "utf8"}
+  )
+
+  if (result.status !== 0) {
+    throw new Error(`prepare-docker-server-host.sh sourcing failed: ${result.stderr}`)
+  }
+
+  return result.stdout
+}
+
+function runCoreCleanupCronInstallation(unsafeCanonical) {
+  const fixtureDirectory = fs.mkdtempSync(path.join(repoRoot, "tests", "fixtures", "core-cron-"))
+  const cronFile = path.join(fixtureDirectory, "tensorbuzz-builder-cores")
+  const unsafeTarget = path.join(fixtureDirectory, "unsafe-target.conf")
+  const originalContent = "locally managed canonical cron content\n"
+
+  fs.writeFileSync(unsafeTarget, originalContent)
+
+  if (unsafeCanonical) {
+    fs.symlinkSync(unsafeTarget, cronFile)
+  }
+
+  const script = path.join(repoRoot, "scripts", "prepare-docker-server-host.sh")
+  const result = spawnSync(
+    "bash",
+    ["-c", 'source "$1" && install_crash_core_cleanup_cron "$2"', "core-cron-test", script, cronFile],
+    {encoding: "utf8"}
+  )
+
+  return {
+    cleanup: () => fs.rmSync(fixtureDirectory, {force: true, recursive: true}),
+    cronFile,
+    originalContent,
+    result
+  }
+}
+
+describe("docker-server crash core capture and image pin", () => {
+  it("pins the DinD daemon image", () => {
+    expect(dockerServer(renderCompose()).image).toBe("docker:29.8.2-dind")
+  })
+
+  it("routes crash cores to /tmp/cores and schedules their cleanup", () => {
+    const content = sourcePrepareScriptVariables()
+
+    expect(content).toContain("kernel.core_pattern = /tmp/cores/core.%e.%p.%t")
+    expect(content).toContain("17 * * * * root find /tmp/cores -type f -mmin +1440 -delete")
+  })
+
+  it("installs the crash core cleanup cron but refuses non-regular targets", () => {
+    const installed = runCoreCleanupCronInstallation(false)
+
+    try {
+      expect(installed.result.status).toBe(0)
+      expect(fs.readFileSync(installed.cronFile, "utf8"))
+        .toContain("17 * * * * root find /tmp/cores -type f -mmin +1440 -delete")
+      expect(fs.statSync(installed.cronFile).mode & 0o777).toBe(0o644)
+    } finally {
+      installed.cleanup()
+    }
+
+    const unsafe = runCoreCleanupCronInstallation(true)
+
+    try {
+      expect(unsafe.result.status).toBe(1)
+      expect(unsafe.result.stderr).toContain("non-regular managed tuning file")
+      expect(fs.readFileSync(unsafe.cronFile, "utf8")).toBe(unsafe.originalContent)
+    } finally {
+      unsafe.cleanup()
+    }
+  })
+})

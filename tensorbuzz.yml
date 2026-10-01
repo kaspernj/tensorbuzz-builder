@@ -10,172 +10,175 @@ before_install:
       sudo apt-get install --yes --no-install-recommends "$@"
     fi
 
-builds:
-  validate:
-    name: Validate
-    script:
-      - npm ci
-      - npm test
-      - npm run lint
-      - shellcheck scripts/*.sh
-      - docker compose --env-file .env.example config --quiet
-      - COMPOSE_FILE=docker-compose.yml:docker-compose.socketduct.yml docker compose --env-file .env.example config --quiet
-      - BUILDER_NETWORK_NAME=tensorbuzz-builder-net COMPOSE_FILE=docker-compose.yml:docker-compose.network-name.yml docker compose --env-file .env.example config --quiet
-      - |
-        docker compose --env-file .env.example config --format json |
-          jq -e --rawfile compose docker-compose.yml '
-            ($compose | capture(
-              "(?m)^      - type: bind\\n"
-              + "        source: [^\\n]+\\n"
-              + "        target: /etc/docker/certs\\.d\\n"
-              + "        read_only: true\\n"
-              + "        bind:\\n"
-              + "          create_host_path: (?<create_host_path>true|false)$"
-            )) as $declared_bind
-            |
-            [.services["docker-server"].volumes[] | select(.target == "/etc/docker/certs.d")] as $mounts
-            | ($mounts | length) == 1
-              and $mounts[0].type == "bind"
-              and $mounts[0].read_only == true
-              and ($declared_bind | has("create_host_path"))
-              and $declared_bind.create_host_path == "false"
-          '
-      - |
-        COMPOSE_PROFILES=registry-cache docker compose --env-file .env.example config --format json |
-          jq -e '
-            .services["docker-server"] as $service
-            | .services["registry-cache"] as $cache
-            | .networks["peakflow-builder"] as $network
-            | .name == "peakflow_builder"
-              and $network.name == "peakflow_builder_peakflow-builder"
-              and $network.ipam.config[0].subnet == "58.0.0.0/24"
-              and $service.networks["peakflow-builder"].ipv4_address == "58.0.0.2"
-              and $cache.networks["peakflow-builder"].ipv4_address == "58.0.0.3"
-              and $service.image == "docker:29.3.0-dind"
-              and $service.command[0] == "dockerd"
-              and ($service.command | index("dockerd-entrypoint.sh")) == null
-              and [$service.command[] | select(startswith("--host="))] == [
-                "--host=unix:///var/run/docker.sock",
-                "--host=tcp://0.0.0.0:8676"
-              ]
-              and [$service.command[] | select(startswith("--tls"))] == [
-                "--tlsverify",
-                "--tlscacert=/shared/certificates/tlscacert.pem",
-                "--tlscert=/shared/certificates/tlscert.pem",
-                "--tlskey=/shared/certificates/tlskey.pem"
-              ]
-              and ($service.ports | length) == 1
-              and $service.ports[0].target == 8676
-              and $service.ports[0].published == "8676"
-              and ($service.command | index("--registry-mirror=http://registry-cache:5000")) != null
-              and ($service.command | index("--insecure-registry=registry-cache:5000")) != null
-              and $cache.environment.REGISTRY_PROXY_REMOTEURL == "https://registry-1.docker.io"
-              and $cache.environment.REGISTRY_HTTP_ADDR == "0.0.0.0:5000"
-              and $cache.ports[0].host_ip == "127.0.0.1"
-              and $cache.ports[0].target == 5000
-              and $cache.ports[0].published == "5000"
-              and ([$service.volumes[].target] | sort) == ["/etc/docker/certs.d", "/shared"]
-              and ([$service.volumes[] | select(.target == "/etc/docker/certs.d" and .read_only == true)] | length) == 1
-          '
-      - |
-        COMPOSE_FILE=docker-compose.yml:docker-compose.socketduct.yml COMPOSE_PROFILES=registry-cache docker compose --env-file .env.example config --format json |
-          jq -e '
-            .services["docker-server"] as $service
-            | .services["registry-cache"] as $cache
-            | .networks["peakflow-builder"] as $network
-            | .name == "peakflow_builder"
-              and $network.name == "peakflow_builder_peakflow-builder"
-              and $network.ipam.config[0].subnet == "58.0.0.0/24"
-              and $service.networks["peakflow-builder"].ipv4_address == "58.0.0.2"
-              and $cache.networks["peakflow-builder"].ipv4_address == "58.0.0.3"
-              and $service.image == "docker:29.3.0-dind"
-              and $service.command[0] == "dockerd"
-              and ($service.command | index("dockerd-entrypoint.sh")) == null
-              and [$service.command[] | select(startswith("--host="))] == [
-                "--host=unix:///var/run/docker.sock",
-                "--host=tcp://0.0.0.0:2375"
-              ]
-              and ([$service.command[] | select(startswith("--tls"))] | length) == 0
-              and $service.environment.DOCKER_TLS_CERTDIR == ""
-              and (($service.ports // []) | length) == 0
-              and ($service.command | index("--registry-mirror=http://registry-cache:5000")) != null
-              and ($service.command | index("--insecure-registry=registry-cache:5000")) != null
-              and $cache.environment.REGISTRY_PROXY_REMOTEURL == "https://registry-1.docker.io"
-              and $cache.environment.REGISTRY_HTTP_ADDR == "0.0.0.0:5000"
-              and $cache.ports[0].host_ip == "127.0.0.1"
-              and $cache.ports[0].target == 5000
-              and $cache.ports[0].published == "5000"
-              and ([$service.volumes[].target] | sort) == ["/etc/docker/certs.d", "/shared"]
-              and ([$service.volumes[] | select(.target == "/etc/docker/certs.d" and .read_only == true)] | length) == 1
-          '
-      - |
-        COMPOSE_PROJECT_NAME=upgrade-project docker compose --env-file .env.example config --format json |
-          jq -e '
-            .name == "upgrade-project"
-              and .networks["peakflow-builder"].name == "upgrade-project_peakflow-builder"
-          '
-      - |
-        export BUILDER_NETWORK_NAME=tensorbuzz-builder-net
-        export BUILDER_NETWORK_SUBNET=172.30.44.0/24
-        export DOCKER_SERVER_IPV4_ADDRESS=172.30.44.10
-        export REGISTRY_CACHE_IPV4_ADDRESS=172.30.44.20
-        export DOCKER_SERVER_TLS_PORT=9443
-        export DOCKER_SERVER_SOCKETDUCT_PORT=12375
-        export HOST_PORT=19443
-        export REGISTRY_CACHE_HOST=cache.portable.invalid
-        export REGISTRY_CACHE_PORT=5500
-        export REGISTRY_PROXY_REMOTEURL=https://upstream.portable.invalid
-        export REGISTRY_CACHE_BIND=127.0.0.2
-        export REGISTRY_CACHE_BIND_PORT=15500
-        export COMPOSE_PROFILES=registry-cache
-        {
-          COMPOSE_FILE=docker-compose.yml:docker-compose.network-name.yml docker compose --env-file .env.example config --format json
-          COMPOSE_FILE=docker-compose.yml:docker-compose.socketduct.yml:docker-compose.network-name.yml docker compose --env-file .env.example config --format json
-        } | jq -s -e '
-          .[0] as $base
-          | .[1] as $socketduct
-          | $base.services["docker-server"] as $base_docker
-          | $socketduct.services["docker-server"] as $socketduct_docker
-          | $base.services["registry-cache"] as $base_cache
-          | $socketduct.services["registry-cache"] as $socketduct_cache
-          | $base.networks["peakflow-builder"].name == "tensorbuzz-builder-net"
-            and $socketduct.networks["peakflow-builder"].name == "tensorbuzz-builder-net"
-            and $base.networks["peakflow-builder"].ipam.config[0].subnet == "172.30.44.0/24"
-            and $socketduct.networks["peakflow-builder"].ipam.config[0].subnet == "172.30.44.0/24"
-            and $base_docker.networks["peakflow-builder"].ipv4_address == "172.30.44.10"
-            and $socketduct_docker.networks["peakflow-builder"].ipv4_address == "172.30.44.10"
-            and $base_cache.networks["peakflow-builder"].ipv4_address == "172.30.44.20"
-            and $socketduct_cache.networks["peakflow-builder"].ipv4_address == "172.30.44.20"
-            and [$base_docker.command[] | select(startswith("--host="))] == [
-              "--host=unix:///var/run/docker.sock",
-              "--host=tcp://0.0.0.0:9443"
-            ]
-            and ([$base_docker.command[] | select(startswith("--tls"))] | length) == 4
-            and $base_docker.ports[0].target == 9443
-            and $base_docker.ports[0].published == "19443"
-            and ($base_docker.command | index("--registry-mirror=http://cache.portable.invalid:5500")) != null
-            and ($base_docker.command | index("--insecure-registry=cache.portable.invalid:5500")) != null
-            and [$socketduct_docker.command[] | select(startswith("--host="))] == [
-              "--host=unix:///var/run/docker.sock",
-              "--host=tcp://0.0.0.0:12375"
-            ]
-            and ([$socketduct_docker.command[] | select(startswith("--tls"))] | length) == 0
-            and $socketduct_docker.environment.DOCKER_TLS_CERTDIR == ""
-            and (($socketduct_docker.ports // []) | length) == 0
-            and ($socketduct_docker.command | index("--registry-mirror=http://cache.portable.invalid:5500")) != null
-            and ($socketduct_docker.command | index("--insecure-registry=cache.portable.invalid:5500")) != null
-            and $base_cache.environment.REGISTRY_HTTP_ADDR == "0.0.0.0:5500"
-            and $socketduct_cache.environment.REGISTRY_HTTP_ADDR == "0.0.0.0:5500"
-            and $base_cache.environment.REGISTRY_PROXY_REMOTEURL == "https://upstream.portable.invalid"
-            and $socketduct_cache.environment.REGISTRY_PROXY_REMOTEURL == "https://upstream.portable.invalid"
-            and $base_cache.ports[0].host_ip == "127.0.0.2"
-            and $base_cache.ports[0].target == 5500
-            and $base_cache.ports[0].published == "15500"
-            and $base_docker.image == $socketduct_docker.image
-            and $base_docker.command[0] == "dockerd"
-            and $socketduct_docker.command[0] == "dockerd"
-            and ($base_docker.command | index("dockerd-entrypoint.sh")) == null
-            and ($socketduct_docker.command | index("dockerd-entrypoint.sh")) == null
-            and $base_docker.volumes == $socketduct_docker.volumes
-            and $base_cache == $socketduct_cache
-        '
+name: Validate
+# Disposable CI build: persist_workspace: false keeps its container (installed
+# deps) out of the persisted image and exempts it from the npm-install guard.
+# It must stay a root build (not under `builds:`) — a nested build inherits the
+# root `builds` key, so persist_workspace: false would be rejected there.
+persist_workspace: false
+script:
+  - npm ci
+  - npm test
+  - npm run lint
+  - shellcheck scripts/*.sh
+  - docker compose --env-file .env.example config --quiet
+  - COMPOSE_FILE=docker-compose.yml:docker-compose.socketduct.yml docker compose --env-file .env.example config --quiet
+  - BUILDER_NETWORK_NAME=tensorbuzz-builder-net COMPOSE_FILE=docker-compose.yml:docker-compose.network-name.yml docker compose --env-file .env.example config --quiet
+  - |
+    docker compose --env-file .env.example config --format json |
+      jq -e --rawfile compose docker-compose.yml '
+        ($compose | capture(
+          "(?m)^      - type: bind\\n"
+          + "        source: [^\\n]+\\n"
+          + "        target: /etc/docker/certs\\.d\\n"
+          + "        read_only: true\\n"
+          + "        bind:\\n"
+          + "          create_host_path: (?<create_host_path>true|false)$"
+        )) as $declared_bind
+        |
+        [.services["docker-server"].volumes[] | select(.target == "/etc/docker/certs.d")] as $mounts
+        | ($mounts | length) == 1
+          and $mounts[0].type == "bind"
+          and $mounts[0].read_only == true
+          and ($declared_bind | has("create_host_path"))
+          and $declared_bind.create_host_path == "false"
+      '
+  - |
+    COMPOSE_PROFILES=registry-cache docker compose --env-file .env.example config --format json |
+      jq -e '
+        .services["docker-server"] as $service
+        | .services["registry-cache"] as $cache
+        | .networks["peakflow-builder"] as $network
+        | .name == "peakflow_builder"
+          and $network.name == "peakflow_builder_peakflow-builder"
+          and $network.ipam.config[0].subnet == "58.0.0.0/24"
+          and $service.networks["peakflow-builder"].ipv4_address == "58.0.0.2"
+          and $cache.networks["peakflow-builder"].ipv4_address == "58.0.0.3"
+          and $service.image == "docker:29.8.2-dind"
+          and $service.command[0] == "dockerd"
+          and ($service.command | index("dockerd-entrypoint.sh")) == null
+          and [$service.command[] | select(startswith("--host="))] == [
+            "--host=unix:///var/run/docker.sock",
+            "--host=tcp://0.0.0.0:8676"
+          ]
+          and [$service.command[] | select(startswith("--tls"))] == [
+            "--tlsverify",
+            "--tlscacert=/shared/certificates/tlscacert.pem",
+            "--tlscert=/shared/certificates/tlscert.pem",
+            "--tlskey=/shared/certificates/tlskey.pem"
+          ]
+          and ($service.ports | length) == 1
+          and $service.ports[0].target == 8676
+          and $service.ports[0].published == "8676"
+          and ($service.command | index("--registry-mirror=http://registry-cache:5000")) != null
+          and ($service.command | index("--insecure-registry=registry-cache:5000")) != null
+          and $cache.environment.REGISTRY_PROXY_REMOTEURL == "https://registry-1.docker.io"
+          and $cache.environment.REGISTRY_HTTP_ADDR == "0.0.0.0:5000"
+          and $cache.ports[0].host_ip == "127.0.0.1"
+          and $cache.ports[0].target == 5000
+          and $cache.ports[0].published == "5000"
+          and ([$service.volumes[].target] | sort) == ["/etc/docker/certs.d", "/shared"]
+          and ([$service.volumes[] | select(.target == "/etc/docker/certs.d" and .read_only == true)] | length) == 1
+      '
+  - |
+    COMPOSE_FILE=docker-compose.yml:docker-compose.socketduct.yml COMPOSE_PROFILES=registry-cache docker compose --env-file .env.example config --format json |
+      jq -e '
+        .services["docker-server"] as $service
+        | .services["registry-cache"] as $cache
+        | .networks["peakflow-builder"] as $network
+        | .name == "peakflow_builder"
+          and $network.name == "peakflow_builder_peakflow-builder"
+          and $network.ipam.config[0].subnet == "58.0.0.0/24"
+          and $service.networks["peakflow-builder"].ipv4_address == "58.0.0.2"
+          and $cache.networks["peakflow-builder"].ipv4_address == "58.0.0.3"
+          and $service.image == "docker:29.8.2-dind"
+          and $service.command[0] == "dockerd"
+          and ($service.command | index("dockerd-entrypoint.sh")) == null
+          and [$service.command[] | select(startswith("--host="))] == [
+            "--host=unix:///var/run/docker.sock",
+            "--host=tcp://0.0.0.0:2375"
+          ]
+          and ([$service.command[] | select(startswith("--tls"))] | length) == 0
+          and $service.environment.DOCKER_TLS_CERTDIR == ""
+          and (($service.ports // []) | length) == 0
+          and ($service.command | index("--registry-mirror=http://registry-cache:5000")) != null
+          and ($service.command | index("--insecure-registry=registry-cache:5000")) != null
+          and $cache.environment.REGISTRY_PROXY_REMOTEURL == "https://registry-1.docker.io"
+          and $cache.environment.REGISTRY_HTTP_ADDR == "0.0.0.0:5000"
+          and $cache.ports[0].host_ip == "127.0.0.1"
+          and $cache.ports[0].target == 5000
+          and $cache.ports[0].published == "5000"
+          and ([$service.volumes[].target] | sort) == ["/etc/docker/certs.d", "/shared"]
+          and ([$service.volumes[] | select(.target == "/etc/docker/certs.d" and .read_only == true)] | length) == 1
+      '
+  - |
+    COMPOSE_PROJECT_NAME=upgrade-project docker compose --env-file .env.example config --format json |
+      jq -e '
+        .name == "upgrade-project"
+          and .networks["peakflow-builder"].name == "upgrade-project_peakflow-builder"
+      '
+  - |
+    export BUILDER_NETWORK_NAME=tensorbuzz-builder-net
+    export BUILDER_NETWORK_SUBNET=172.30.44.0/24
+    export DOCKER_SERVER_IPV4_ADDRESS=172.30.44.10
+    export REGISTRY_CACHE_IPV4_ADDRESS=172.30.44.20
+    export DOCKER_SERVER_TLS_PORT=9443
+    export DOCKER_SERVER_SOCKETDUCT_PORT=12375
+    export HOST_PORT=19443
+    export REGISTRY_CACHE_HOST=cache.portable.invalid
+    export REGISTRY_CACHE_PORT=5500
+    export REGISTRY_PROXY_REMOTEURL=https://upstream.portable.invalid
+    export REGISTRY_CACHE_BIND=127.0.0.2
+    export REGISTRY_CACHE_BIND_PORT=15500
+    export COMPOSE_PROFILES=registry-cache
+    {
+      COMPOSE_FILE=docker-compose.yml:docker-compose.network-name.yml docker compose --env-file .env.example config --format json
+      COMPOSE_FILE=docker-compose.yml:docker-compose.socketduct.yml:docker-compose.network-name.yml docker compose --env-file .env.example config --format json
+    } | jq -s -e '
+      .[0] as $base
+      | .[1] as $socketduct
+      | $base.services["docker-server"] as $base_docker
+      | $socketduct.services["docker-server"] as $socketduct_docker
+      | $base.services["registry-cache"] as $base_cache
+      | $socketduct.services["registry-cache"] as $socketduct_cache
+      | $base.networks["peakflow-builder"].name == "tensorbuzz-builder-net"
+        and $socketduct.networks["peakflow-builder"].name == "tensorbuzz-builder-net"
+        and $base.networks["peakflow-builder"].ipam.config[0].subnet == "172.30.44.0/24"
+        and $socketduct.networks["peakflow-builder"].ipam.config[0].subnet == "172.30.44.0/24"
+        and $base_docker.networks["peakflow-builder"].ipv4_address == "172.30.44.10"
+        and $socketduct_docker.networks["peakflow-builder"].ipv4_address == "172.30.44.10"
+        and $base_cache.networks["peakflow-builder"].ipv4_address == "172.30.44.20"
+        and $socketduct_cache.networks["peakflow-builder"].ipv4_address == "172.30.44.20"
+        and [$base_docker.command[] | select(startswith("--host="))] == [
+          "--host=unix:///var/run/docker.sock",
+          "--host=tcp://0.0.0.0:9443"
+        ]
+        and ([$base_docker.command[] | select(startswith("--tls"))] | length) == 4
+        and $base_docker.ports[0].target == 9443
+        and $base_docker.ports[0].published == "19443"
+        and ($base_docker.command | index("--registry-mirror=http://cache.portable.invalid:5500")) != null
+        and ($base_docker.command | index("--insecure-registry=cache.portable.invalid:5500")) != null
+        and [$socketduct_docker.command[] | select(startswith("--host="))] == [
+          "--host=unix:///var/run/docker.sock",
+          "--host=tcp://0.0.0.0:12375"
+        ]
+        and ([$socketduct_docker.command[] | select(startswith("--tls"))] | length) == 0
+        and $socketduct_docker.environment.DOCKER_TLS_CERTDIR == ""
+        and (($socketduct_docker.ports // []) | length) == 0
+        and ($socketduct_docker.command | index("--registry-mirror=http://cache.portable.invalid:5500")) != null
+        and ($socketduct_docker.command | index("--insecure-registry=cache.portable.invalid:5500")) != null
+        and $base_cache.environment.REGISTRY_HTTP_ADDR == "0.0.0.0:5500"
+        and $socketduct_cache.environment.REGISTRY_HTTP_ADDR == "0.0.0.0:5500"
+        and $base_cache.environment.REGISTRY_PROXY_REMOTEURL == "https://upstream.portable.invalid"
+        and $socketduct_cache.environment.REGISTRY_PROXY_REMOTEURL == "https://upstream.portable.invalid"
+        and $base_cache.ports[0].host_ip == "127.0.0.2"
+        and $base_cache.ports[0].target == 5500
+        and $base_cache.ports[0].published == "15500"
+        and $base_docker.image == $socketduct_docker.image
+        and $base_docker.command[0] == "dockerd"
+        and $socketduct_docker.command[0] == "dockerd"
+        and ($base_docker.command | index("dockerd-entrypoint.sh")) == null
+        and ($socketduct_docker.command | index("dockerd-entrypoint.sh")) == null
+        and $base_docker.volumes == $socketduct_docker.volumes
+        and $base_cache == $socketduct_cache
+    '

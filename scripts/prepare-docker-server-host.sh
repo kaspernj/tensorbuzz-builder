@@ -15,6 +15,23 @@ fs.inotify.max_user_instances = 1024
 fs.inotify.max_user_watches = 1048576
 kernel.pid_max = 4194304
 vm.max_map_count = 262144
+# Route crash core files to /tmp/cores. The kernel resolves a file pattern
+# against the crashing process's own root, so cores from nested build
+# containers land in that container's /tmp/cores (TensorBuzz crash capture
+# arms the directory and the unlimited core rlimit), while host-level cores
+# land on the host. This replaces the distribution's default core handler
+# (for example Ubuntu's apport) for all host processes.
+kernel.core_pattern = /tmp/cores/core.%e.%p.%t
+EOF
+)"
+
+CORES_DIRECTORY="/tmp/cores"
+CORE_CLEANUP_CRON_FILE="/etc/cron.d/tensorbuzz-builder-cores"
+CORE_CLEANUP_CRON_CONTENT="$(cat <<'EOF'
+# tensorbuzz-builder: expire crash core files older than 24 hours from the
+# kernel.core_pattern directory. Cores from build containers live in ephemeral
+# containers and disappear with them; this bounds host-level core files.
+17 * * * * root find /tmp/cores -type f -mmin +1440 -delete
 EOF
 )"
 
@@ -99,6 +116,16 @@ write_managed_tuning_file() {
   printf '%s\n' "${content}" >"${managed_file}"
 }
 
+# cron(8) ignores /etc/cron.d entries that are not world-readable regular
+# files, so the mode is explicit here.
+install_crash_core_cleanup_cron() {
+  local cron_file="$1"
+
+  validate_managed_tuning_file "${cron_file}" || return 1
+  printf '%s\n' "${CORE_CLEANUP_CRON_CONTENT}" >"${cron_file}"
+  chmod 0644 -- "${cron_file}"
+}
+
 main() {
   if [[ "${EUID}" -ne 0 ]]; then
     echo "Run as root: sudo $0"
@@ -117,6 +144,12 @@ main() {
     "${LIMITS_FILE}"
   write_managed_tuning_file "${SYSCTL_FILE}" "${SYSCTL_CONTENT}"
   write_managed_tuning_file "${LIMITS_FILE}" "${LIMITS_CONTENT}"
+  install_crash_core_cleanup_cron "${CORE_CLEANUP_CRON_FILE}"
+
+  # Host-level core destination; nested build containers get their own
+  # /tmp/cores from TensorBuzz crash capture at arm time.
+  mkdir -p -- "${CORES_DIRECTORY}"
+  chmod 0777 -- "${CORES_DIRECTORY}"
 
   sysctl --system
 
@@ -126,6 +159,11 @@ Prepared host settings for tensorbuzz-builder.
 Files written:
   ${SYSCTL_FILE}
   ${LIMITS_FILE}
+  ${CORE_CLEANUP_CRON_FILE}
+  ${CORES_DIRECTORY}/ (kernel.core_pattern destination)
+
+Note: kernel.core_pattern now routes all host crash cores to ${CORES_DIRECTORY}
+and replaces the distribution's default core handler (for example apport).
 
 Next steps:
   1. Restart any long-lived shell or service session that should inherit the new limits.
@@ -133,6 +171,8 @@ Next steps:
        ./scripts/recreate-docker-server.sh
   3. Verify inside the container:
        docker compose exec docker-server sh -lc 'ulimit -n && ulimit -u && df -h /dev/shm && ls -l /dev/kvm'
+  4. Verify the core pattern:
+       sysctl kernel.core_pattern
 
 If you want different limits, adjust these environment variables in your shell or Compose env file before starting:
   DOCKER_SERVER_SHM_SIZE
