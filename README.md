@@ -97,6 +97,17 @@ recreation and readback. That restores the previous unlimited parent model, so
 use it only to recover a concrete incompatibility and keep the builder drained
 until another safe containment plan is selected.
 
+## Crash core capture
+
+The prepare script points `kernel.core_pattern` at `/tmp/cores`, where
+TensorBuzz build-container crashes write their core files (the kernel resolves
+the pattern against the crashing process's own root) so the backend capture
+path can extract a gdb backtrace. The pattern is host-wide and replaces the
+distribution's default core handler (for example apport); a cron entry
+installed by the same script deletes host-level cores older than 24 hours.
+See [docs/crash-core-capture.md](docs/crash-core-capture.md) for the full
+mechanism and rollout notes.
+
 ## Docker API modes
 
 ### Default: host-published TLS

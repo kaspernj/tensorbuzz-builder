@@ -2,7 +2,7 @@ name: ${COMPOSE_PROJECT_NAME:-peakflow_builder}
 
 services:
   docker-server:
-    image: docker:29.3.0-dind
+    image: docker:29.8.2-dind
     privileged: true
     devices:
       - /dev/kvm:/dev/kvm

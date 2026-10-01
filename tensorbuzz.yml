@@ -51,7 +51,7 @@ builds:
               and $network.ipam.config[0].subnet == "58.0.0.0/24"
               and $service.networks["peakflow-builder"].ipv4_address == "58.0.0.2"
               and $cache.networks["peakflow-builder"].ipv4_address == "58.0.0.3"
-              and $service.image == "docker:29.3.0-dind"
+              and $service.image == "docker:29.8.2-dind"
               and $service.command[0] == "dockerd"
               and ($service.command | index("dockerd-entrypoint.sh")) == null
               and [$service.command[] | select(startswith("--host="))] == [
@@ -88,7 +88,7 @@ builds:
               and $network.ipam.config[0].subnet == "58.0.0.0/24"
               and $service.networks["peakflow-builder"].ipv4_address == "58.0.0.2"
               and $cache.networks["peakflow-builder"].ipv4_address == "58.0.0.3"
-              and $service.image == "docker:29.3.0-dind"
+              and $service.image == "docker:29.8.2-dind"
               and $service.command[0] == "dockerd"
               and ($service.command | index("dockerd-entrypoint.sh")) == null
               and [$service.command[] | select(startswith("--host="))] == [
