@@ -13,6 +13,9 @@ before_install:
 builds:
   validate:
     name: Validate
+    # Childless CI build: never commit its container (with installed deps)
+    # into a persisted image, which also exempts it from the npm-install guard.
+    persist_workspace: false
     script:
       - npm ci
       - npm test
