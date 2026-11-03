@@ -388,7 +388,7 @@ function runCoreCleanupCronInstallation(unsafeCanonical) {
 
 describe("docker-server crash core capture and image pin", () => {
   it("pins the DinD daemon image", () => {
-    expect(dockerServer(renderCompose()).image).toBe("docker:29.8.2-dind")
+    expect(dockerServer(renderCompose()).image).toBe("docker:29.9.2-dind")
   })
 
   it("routes crash cores to /tmp/cores and schedules their cleanup", () => {
