@@ -28,6 +28,7 @@ particular physical network or machine is required:
 | `REGISTRY_PROXY_REMOTEURL` | `https://registry-1.docker.io` | Upstream registry mirrored by a local cache |
 | `REGISTRY_CACHE_BIND` | `127.0.0.1` | Host address used to publish a local cache |
 | `REGISTRY_CACHE_BIND_PORT` | `5000` | Host port used to publish a local cache |
+| `DOCKER_SERVER_DATA_VOLUME` | required | Compose volume that owns the DinD daemon data root; each builder pins its existing volume |
 
 Both service addresses must belong to `BUILDER_NETWORK_SUBNET`. Choose a subnet
 that does not overlap host routes or other Docker networks.
@@ -53,6 +54,52 @@ BUILDER_NETWORK_NAME=tensorbuzz-builder-net
 `tensorbuzz-builder-net` is only an example. Use `registry-cache` as
 `REGISTRY_CACHE_HOST` only when the local cache profile is enabled; otherwise
 provide a resolvable external hostname or address.
+
+## DinD data volume
+
+`docker-server` keeps its daemon data in a Compose-owned named volume declared as
+`external`. Before this, the data root came from the image's `VOLUME`
+instruction, so Compose allocated an anonymous volume. A plain
+`docker compose up -d --force-recreate` carries that anonymous volume to the new
+container, but a recreation path that does not retrieve it —
+`up --renew-anon-volumes`, `docker rm` followed by a fresh create, or a Compose
+project rename — leaves the old volume with no owner and no reference, where only
+a manual removal can reclaim it. That is how a 73 GiB orphan was found on Dozer.
+
+Each builder pins its own existing volume in `.env`. Read the volume the running
+container actually uses:
+
+```bash
+docker inspect peakflow_builder-docker-server-1 \
+  --format '{{range .Mounts}}{{.Name}} -> {{.Destination}}{{end}}'
+```
+
+Put that name in `DOCKER_SERVER_DATA_VOLUME` (a 64-character volume id is its
+name), then render and recreate on a drained builder:
+
+```bash
+docker compose config --quiet
+./scripts/recreate-docker-server.sh
+./scripts/verify-dind-data-volume.sh
+```
+
+Because the volume is external, Compose never creates it. A host that has not
+pinned its own volume fails before any container is created — `required variable
+DOCKER_SERVER_DATA_VOLUME is missing a value`, or `volume ... declared as
+external, but could not be found` — so a mis-set builder cannot silently come up
+on an empty data root. A new host creates the volume first:
+
+```bash
+docker volume create peakflow_builder_docker-server_data
+```
+
+Never reclaim a stranded data volume with `docker volume prune` or
+`docker system prune --volumes`: those act on every unreferenced volume,
+including ones another builder or nested workload still owns. Remove one exact
+volume id, and only after the host mount table, the container mounts, the
+`engine-id` inside the data root, and the newest mtime in it all agree that the
+volume is dead. `scripts/verify-dind-data-volume.sh` reports that evidence without
+changing anything.
 
 ## Memory containment
 
