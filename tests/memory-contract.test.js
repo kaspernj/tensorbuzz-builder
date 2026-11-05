@@ -5,6 +5,8 @@ import {fileURLToPath} from "node:url"
 
 import {describe, expect, it} from "@velocious/testing"
 
+import {assertReadOnlyDockerCommand} from "../scripts/verify-dind-data-volume.js"
+
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const gibibyte = 1024 ** 3
 const composeFiles = [
@@ -14,6 +16,7 @@ const composeFiles = [
 ]
 const emptyEnvFile = path.join(repoRoot, "tests", "fixtures", "empty.env")
 const testComposeProjectName = "tensorbuzz-builder-memory-contract-test"
+const testDinDDataVolumeName = "tensorbuzz-builder-test-dind-data"
 
 const legacySysctlContent = `# Peakflow builder host tuning for a process-heavy Docker-in-Docker service.
 fs.file-max = 2097152
@@ -48,14 +51,32 @@ function composeInterpolationVariables() {
   return variables
 }
 
-function renderCompose({
-  composeEnvironment = {},
-  inheritedEnvironment = {},
-  memoryLimit,
-  projectDirectory,
-  projectName = testComposeProjectName,
-  socketduct = false
-} = {}) {
+function composeTestEnvironment({composeEnvironment = {}, inheritedEnvironment = {}, memoryLimit} = {}) {
+  const env = {...process.env, ...inheritedEnvironment}
+
+  for (const key of composeInterpolationVariables()) {
+    delete env[key]
+  }
+
+  env.DOCKER_SERVER_DATA_VOLUME = testDinDDataVolumeName
+
+  // A null value in composeEnvironment removes the variable, which is how the
+  // "builder has not pinned its volume" contract is rendered.
+  for (const [key, value] of Object.entries(composeEnvironment)) {
+    if (value === null) {
+      delete env[key]
+      continue
+    }
+
+    env[key] = value
+  }
+
+  if (memoryLimit) env.DOCKER_SERVER_MEMORY_LIMIT = memoryLimit
+
+  return env
+}
+
+function composeConfigArgs({projectDirectory, projectName = testComposeProjectName, socketduct = false} = {}) {
   const args = ["compose"]
 
   if (projectName) args.push("--project-name", projectName)
@@ -74,20 +95,25 @@ function renderCompose({
 
   args.push("config", "--format", "json")
 
-  const env = {...process.env, ...inheritedEnvironment}
-  for (const key of composeInterpolationVariables()) {
-    delete env[key]
-  }
+  return args
+}
 
-  Object.assign(env, composeEnvironment)
-  if (memoryLimit) env.DOCKER_SERVER_MEMORY_LIMIT = memoryLimit
-
-  return JSON.parse(execFileSync("docker", args, {
+function renderCompose(options = {}) {
+  return JSON.parse(execFileSync("docker", composeConfigArgs(options), {
     cwd: repoRoot,
     encoding: "utf8",
-    env,
+    env: composeTestEnvironment(options),
     stdio: ["ignore", "pipe", "pipe"]
   }))
+}
+
+function renderComposeStatus(options = {}) {
+  return spawnSync("docker", composeConfigArgs(options), {
+    cwd: repoRoot,
+    encoding: "utf8",
+    env: composeTestEnvironment(options),
+    stdio: ["ignore", "pipe", "pipe"]
+  })
 }
 
 function runLegacyTuningMigration(sysctlContent, limitsContent) {
@@ -341,6 +367,89 @@ describe("docker-server memory containment", () => {
 
     expect(mountsByTarget.has("/shared")).toBeTrue()
     expect(mountsByTarget.get("/etc/docker/certs.d").read_only).toBeTrue()
+  })
+})
+
+describe("docker-server DinD data volume", () => {
+  const existingDataVolumeName = "71d754ae1f0d3b6c9e5a2c8d4b7a6f9e0d1c2b3a4e5f60718293a4b5c6d7e8f9"
+
+  it("mounts the daemon data root through a declared external volume", () => {
+    const config = renderCompose({composeEnvironment: {DOCKER_SERVER_DATA_VOLUME: existingDataVolumeName}})
+    const dataMounts = dockerServer(config).volumes.filter((mount) => mount.target === "/var/lib/docker")
+
+    expect(dataMounts.length).toBe(1)
+    expect(dataMounts[0].type).toBe("volume")
+    expect(dataMounts[0].source).toBe("docker-server-data")
+    expect(config.volumes["docker-server-data"].external).toBeTrue()
+    expect(config.volumes["docker-server-data"].name).toBe(existingDataVolumeName)
+  })
+
+  it("inherits the same data volume in Socketduct mode", () => {
+    const config = renderCompose({
+      composeEnvironment: {DOCKER_SERVER_DATA_VOLUME: existingDataVolumeName},
+      socketduct: true
+    })
+
+    const dataMounts = dockerServer(config).volumes.filter((mount) => mount.target === "/var/lib/docker")
+
+    expect(dataMounts.length).toBe(1)
+    expect(dataMounts[0].source).toBe("docker-server-data")
+    expect(config.volumes["docker-server-data"].name).toBe(existingDataVolumeName)
+  })
+
+  it("refuses to render a second data root when the builder has not pinned its own volume", () => {
+    const result = renderComposeStatus({composeEnvironment: {DOCKER_SERVER_DATA_VOLUME: null}})
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain("DOCKER_SERVER_DATA_VOLUME")
+  })
+
+  it("keeps the checked-in env file renderable for the Compose gate", () => {
+    const assignment = fs.readFileSync(path.join(repoRoot, ".env.example"), "utf8")
+      .match(/^DOCKER_SERVER_DATA_VOLUME=(.+)$/mu)
+
+    expect(assignment === null).toBeFalse()
+    expect(assignment[1]).toBe("peakflow_builder_docker-server_data")
+  })
+
+  it("keeps data-volume verification read-only", () => {
+    expect(fs.existsSync(path.join(repoRoot, "scripts", "verify-dind-data-volume.sh"))).toBeFalse()
+
+    for (const removal of [
+      ["volume", "rm", "some-volume"],
+      ["volume", "prune"],
+      ["system", "prune"],
+      ["container", "rm", "some-container"],
+      ["compose", "up", "-d"],
+      []
+    ]) {
+      let refusal = null
+
+      try {
+        assertReadOnlyDockerCommand(removal)
+      } catch (error) {
+        refusal = error.message
+      }
+
+      expect(refusal === null).toBeFalse()
+      expect(refusal).toContain("Refusing non-read-only docker command")
+    }
+
+    for (const inspection of [
+      ["inspect", "peakflow_builder-docker-server-1", "--format", "{{.Id}}"],
+      ["inspect", "first", "second", "--format", "{{.Id}}"],
+      ["ps", "--all", "--quiet"]
+    ]) {
+      let failure = null
+
+      try {
+        assertReadOnlyDockerCommand(inspection)
+      } catch (error) {
+        failure = error.message
+      }
+
+      expect(failure === null).toBeTrue()
+    }
   })
 })
 
