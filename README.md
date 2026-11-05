@@ -80,7 +80,7 @@ name), then render and recreate on a drained builder:
 ```bash
 docker compose config --quiet
 ./scripts/recreate-docker-server.sh
-./scripts/verify-dind-data-volume.sh
+node scripts/verify-dind-data-volume.js
 ```
 
 Because the volume is external, Compose never creates it. A host that has not
@@ -98,8 +98,9 @@ Never reclaim a stranded data volume with `docker volume prune` or
 including ones another builder or nested workload still owns. Remove one exact
 volume id, and only after the host mount table, the container mounts, the
 `engine-id` inside the data root, and the newest mtime in it all agree that the
-volume is dead. `scripts/verify-dind-data-volume.sh` reports that evidence without
-changing anything.
+volume is dead. `scripts/verify-dind-data-volume.js` reports that evidence and
+nothing else: it runs only `docker inspect` and `docker ps`, and refuses any other
+Docker command before it reaches the daemon.
 
 ## Memory containment
 

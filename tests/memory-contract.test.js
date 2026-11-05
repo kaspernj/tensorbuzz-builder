@@ -5,6 +5,8 @@ import {fileURLToPath} from "node:url"
 
 import {describe, expect, it} from "@velocious/testing"
 
+import {assertReadOnlyDockerCommand} from "../scripts/verify-dind-data-volume.js"
+
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const gibibyte = 1024 ** 3
 const composeFiles = [
@@ -411,10 +413,42 @@ describe("docker-server DinD data volume", () => {
   })
 
   it("keeps data-volume verification read-only", () => {
-    const script = fs.readFileSync(path.join(repoRoot, "scripts", "verify-dind-data-volume.sh"), "utf8")
+    expect(fs.existsSync(path.join(repoRoot, "scripts", "verify-dind-data-volume.sh"))).toBeFalse()
 
-    for (const mutation of ["docker system prune", "docker volume prune", "docker volume rm", "docker compose up"]) {
-      expect(script.includes(mutation)).toBeFalse()
+    for (const removal of [
+      ["volume", "rm", "some-volume"],
+      ["volume", "prune"],
+      ["system", "prune"],
+      ["container", "rm", "some-container"],
+      ["compose", "up", "-d"],
+      []
+    ]) {
+      let refusal = null
+
+      try {
+        assertReadOnlyDockerCommand(removal)
+      } catch (error) {
+        refusal = error.message
+      }
+
+      expect(refusal === null).toBeFalse()
+      expect(refusal).toContain("Refusing non-read-only docker command")
+    }
+
+    for (const inspection of [
+      ["inspect", "peakflow_builder-docker-server-1", "--format", "{{.Id}}"],
+      ["inspect", "first", "second", "--format", "{{.Id}}"],
+      ["ps", "--all", "--quiet"]
+    ]) {
+      let failure = null
+
+      try {
+        assertReadOnlyDockerCommand(inspection)
+      } catch (error) {
+        failure = error.message
+      }
+
+      expect(failure === null).toBeTrue()
     }
   })
 })
