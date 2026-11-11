@@ -10,11 +10,14 @@ services:
     init: true
     shm_size: ${DOCKER_SERVER_SHM_SIZE:-2g}
     mem_limit: ${DOCKER_SERVER_MEMORY_LIMIT:-20g}
-    memswap_limit: ${DOCKER_SERVER_MEMORY_LIMIT:-20g}
+    memswap_limit: ${DOCKER_SERVER_MEMORY_SWAP_LIMIT:-${DOCKER_SERVER_MEMORY_LIMIT:-20g}}
     stop_grace_period: 1m
     ports:
       - "${HOST_PORT:-8676}:${DOCKER_SERVER_TLS_PORT:-8676}"
     volumes:
+      - type: volume
+        source: docker-server-data
+        target: /var/lib/docker
       - ./shared:/shared
       - type: bind
         source: ${DOCKER_REGISTRY_CERTS_DIR:-./shared/docker-certs.d}
@@ -69,3 +72,8 @@ networks:
     ipam:
       config:
         - subnet: ${BUILDER_NETWORK_SUBNET:-58.0.0.0/24}
+
+volumes:
+  docker-server-data:
+    external: true
+    name: ${DOCKER_SERVER_DATA_VOLUME:?Set DOCKER_SERVER_DATA_VOLUME in .env to the existing DinD data volume}

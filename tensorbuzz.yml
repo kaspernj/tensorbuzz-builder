@@ -77,8 +77,11 @@ script:
           and $cache.ports[0].host_ip == "127.0.0.1"
           and $cache.ports[0].target == 5000
           and $cache.ports[0].published == "5000"
-          and ([$service.volumes[].target] | sort) == ["/etc/docker/certs.d", "/shared"]
+          and ([$service.volumes[].target] | sort) == ["/etc/docker/certs.d", "/shared", "/var/lib/docker"]
           and ([$service.volumes[] | select(.target == "/etc/docker/certs.d" and .read_only == true)] | length) == 1
+          and ([$service.volumes[] | select(.target == "/var/lib/docker" and .type == "volume" and .source == "docker-server-data")] | length) == 1
+          and .volumes["docker-server-data"].external == true
+          and .volumes["docker-server-data"].name == "peakflow_builder_docker-server_data"
       '
   - |
     COMPOSE_FILE=docker-compose.yml:docker-compose.socketduct.yml COMPOSE_PROFILES=registry-cache docker compose --env-file .env.example config --format json |
@@ -108,7 +111,7 @@ script:
           and $cache.ports[0].host_ip == "127.0.0.1"
           and $cache.ports[0].target == 5000
           and $cache.ports[0].published == "5000"
-          and ([$service.volumes[].target] | sort) == ["/etc/docker/certs.d", "/shared"]
+          and ([$service.volumes[].target] | sort) == ["/etc/docker/certs.d", "/shared", "/var/lib/docker"]
           and ([$service.volumes[] | select(.target == "/etc/docker/certs.d" and .read_only == true)] | length) == 1
       '
   - |

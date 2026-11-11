@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "test": "velocious-test tests/memory-contract.test.js tests/quiescence-probe.test.js",
-    "lint": "node --check scripts/quiescence-probe.js && node --check tests/memory-contract.test.js && node --check tests/quiescence-probe.test.js"
+    "lint": "node --check tests/memory-contract.test.js && node --check scripts/verify-dind-data-volume.js && node --check scripts/quiescence-probe.js && node --check tests/quiescence-probe.test.js"
   },
   "devDependencies": {
     "@velocious/testing": "0.0.14"
