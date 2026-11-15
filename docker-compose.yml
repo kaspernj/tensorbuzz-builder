@@ -74,6 +74,11 @@ networks:
         - subnet: ${BUILDER_NETWORK_SUBNET:-58.0.0.0/24}
 
 volumes:
+  # Compose owns this volume by a stable derived name, so it is created on the
+  # first up and reused by every recreation. It is deliberately not `external`:
+  # an external volume turns a missing data root into a hard boot failure
+  # (`external volume "<name>" not found`), which took Merovingian completely
+  # offline. Do not pin a 64-character anonymous volume id here either: that id
+  # can be pruned out from under the builder and reproduces the same outage.
   docker-server-data:
-    external: true
-    name: ${DOCKER_SERVER_DATA_VOLUME:?Set DOCKER_SERVER_DATA_VOLUME in .env to the existing DinD data volume}
+    name: ${DOCKER_SERVER_DATA_VOLUME:-${COMPOSE_PROJECT_NAME:-peakflow_builder}_docker-server_data}

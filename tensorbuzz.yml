@@ -80,7 +80,7 @@ script:
           and ([$service.volumes[].target] | sort) == ["/etc/docker/certs.d", "/shared", "/var/lib/docker"]
           and ([$service.volumes[] | select(.target == "/etc/docker/certs.d" and .read_only == true)] | length) == 1
           and ([$service.volumes[] | select(.target == "/var/lib/docker" and .type == "volume" and .source == "docker-server-data")] | length) == 1
-          and .volumes["docker-server-data"].external == true
+          and .volumes["docker-server-data"].external != true
           and .volumes["docker-server-data"].name == "peakflow_builder_docker-server_data"
       '
   - |
@@ -113,12 +113,16 @@ script:
           and $cache.ports[0].published == "5000"
           and ([$service.volumes[].target] | sort) == ["/etc/docker/certs.d", "/shared", "/var/lib/docker"]
           and ([$service.volumes[] | select(.target == "/etc/docker/certs.d" and .read_only == true)] | length) == 1
+          and ([$service.volumes[] | select(.target == "/var/lib/docker" and .type == "volume" and .source == "docker-server-data")] | length) == 1
+          and .volumes["docker-server-data"].external != true
+          and .volumes["docker-server-data"].name == "peakflow_builder_docker-server_data"
       '
   - |
     COMPOSE_PROJECT_NAME=upgrade-project docker compose --env-file .env.example config --format json |
       jq -e '
         .name == "upgrade-project"
           and .networks["peakflow-builder"].name == "upgrade-project_peakflow-builder"
+          and .volumes["docker-server-data"].name == "upgrade-project_docker-server_data"
       '
   - |
     export BUILDER_NETWORK_NAME=tensorbuzz-builder-net
