@@ -11,6 +11,16 @@ before_install:
     fi
 
 name: Validate
+# The disposable root build is the only lane in this repository. Keep source,
+# tests, scripts, Compose files, package manifests, shared tooling, and root
+# configuration broad; documentation-only changes do not affect its commands.
+paths:
+  - "**"
+  - "!docs/**"
+  - "!changelog.d/**"
+  - "!README.md"
+  - "!.github/**"
+  - "!.gitignore"
 # Disposable CI build: persist_workspace: false keeps its container (installed
 # deps) out of the persisted image and exempts it from the npm-install guard.
 # It must stay a root build (not under `builds:`) — a nested build inherits the
