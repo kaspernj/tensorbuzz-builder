@@ -6,6 +6,12 @@ The source and product name is `tensorbuzz-builder`. Existing runtime names are
 intentionally retained for in-place compatibility; see
 [Naming and runtime compatibility](docs/naming-and-runtime-compatibility.md).
 
+## Validation lane path filtering
+
+The disposable `Validate` lane runs when source, tests, scripts, Compose files,
+package manifests, shared tooling, or root configuration changes. Documentation
+and repository metadata changes are intentionally terminal `skipped` results.
+
 ## Topology configuration
 
 Copy `.env.example` to `.env` and choose values appropriate for the deployment.
