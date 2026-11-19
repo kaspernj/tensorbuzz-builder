@@ -34,7 +34,7 @@ particular physical network or machine is required:
 | `REGISTRY_PROXY_REMOTEURL` | `https://registry-1.docker.io` | Upstream registry mirrored by a local cache |
 | `REGISTRY_CACHE_BIND` | `127.0.0.1` | Host address used to publish a local cache |
 | `REGISTRY_CACHE_BIND_PORT` | `5000` | Host port used to publish a local cache |
-| `DOCKER_SERVER_DATA_VOLUME` | required | Compose volume that owns the DinD daemon data root; each builder pins its existing volume |
+| `DOCKER_SERVER_DATA_VOLUME` | unset, derived as `<project>_docker-server_data` | Optional adoption override used only while one host migrates onto the derived name |
 
 Both service addresses must belong to `BUILDER_NETWORK_SUBNET`. Choose a subnet
 that does not overlap host routes or other Docker networks.
@@ -63,25 +63,76 @@ provide a resolvable external hostname or address.
 
 ## DinD data volume
 
-`docker-server` keeps its daemon data in a Compose-owned named volume declared as
-`external`. Before this, the data root came from the image's `VOLUME`
-instruction, so Compose allocated an anonymous volume. A plain
-`docker compose up -d --force-recreate` carries that anonymous volume to the new
-container, but a recreation path that does not retrieve it —
-`up --renew-anon-volumes`, `docker rm` followed by a fresh create, or a Compose
-project rename — leaves the old volume with no owner and no reference, where only
-a manual removal can reclaim it. That is how a 73 GiB orphan was found on Dozer.
+`docker-server` keeps its nested daemon data in a Compose-owned named volume whose
+name is derived from the Compose project: `peakflow_builder_docker-server_data` for
+the default project, `<project>_docker-server_data` for any other one. Compose
+creates it on the first `up` and reuses it on every recreation, so the data root has
+exactly one owner.
 
-Each builder pins its own existing volume in `.env`. Read the volume the running
-container actually uses:
+Before this, the data root came from the image's `VOLUME` instruction, so Compose
+allocated an anonymous volume. A plain `docker compose up -d --force-recreate`
+carries that anonymous volume to the new container, but a recreation path that does
+not retrieve it — `up --renew-anon-volumes`, `docker rm` followed by a fresh create,
+or a Compose project rename — leaves the old volume with no owner and no reference,
+where only a manual removal can reclaim it. That is how a 73 GiB orphan was found on
+Dozer.
+
+Declaring that anonymous volume `external` and pinning its id is not the fix, it is
+a second failure mode. Measured on Merovingian, 2026-11-15: its host-local Compose
+file used `external: true` with `.env` pinning `DOCKER_SERVER_DATA_VOLUME` to
+`5d44a6d61021bc41de3663a3fdb8fd996efb9a060e9aee79a90d92e4b6d5c480` — an anonymous id
+promoted into a contract. A `docker compose down` followed by
+`docker system prune -a --volumes` against the **host** daemon deleted that volume,
+and every later `docker compose up -d` then failed with
+`external volume "5d44a6d6…" not found` before creating any container. The builder
+was completely unreachable until `docker volume create
+peakflow_builder_docker-server_data` plus repointing `.env` brought it back, with
+the whole nested daemon root gone: `Images 0 / Containers 0 / Local Volumes 0 /
+Build Cache 0`.
+
+Measured behaviour of the three shapes (Docker 29.8.2, Compose v5.5.1, a marker file
+written inside the volume, a throwaway fixture stack):
+
+| shape | volume missing | `up -d --force-recreate` | `up -d --renew-anon-volumes` | `down -v` |
+| --- | --- | --- | --- | --- |
+| image `VOLUME` (old) | anonymous volume allocated | marker survives | new volume allocated, old one left unreferenced | anonymous volume removed |
+| `external: true` + pinned name | `up` fails with `external volume "<name>" not found`, no container created | marker survives | marker survives | volume survives |
+| derived name, not external | Compose creates it and `up` succeeds | marker survives | marker survives | **volume removed** |
+
+The shipped default is the third row: no builder needs any per-host value to boot, a
+recreation cannot orphan the data root, and a pruned data root costs a cold re-pull
+instead of an outage. Its price is that `docker compose down -v` removes a
+project-owned volume, which is why that command is on the forbidden list below.
+
+`DOCKER_SERVER_DATA_VOLUME` is an adoption override for one host mid-migration and
+nothing else. Where it is set, it must be a human-stable name (Morpheus uses
+`builder-ssd-data`), never a 64-character anonymous id. `scripts/verify-dind-data-volume.js`
+warns when the volume a running builder owns is a generated id.
+
+### Migrating one builder onto the derived name
+
+Read what the running container actually owns:
 
 ```bash
 docker inspect peakflow_builder-docker-server-1 \
-  --format '{{range .Mounts}}{{.Name}} -> {{.Destination}}{{end}}'
+  --format '{{range .Mounts}}{{if eq .Destination "/var/lib/docker"}}{{.Name}}{{end}}{{end}}'
 ```
 
-Put that name in `DOCKER_SERVER_DATA_VOLUME` (a 64-character volume id is its
-name), then render and recreate on a drained builder:
+If that is already `<project>_docker-server_data`, delete any pin from `.env` and
+render. If it is a generated id, drain the builder and pick one of the two honest
+options, recording which one was taken:
+
+- **Cold** (what Merovingian's recovery actually did): accept the re-pull.
+  `./scripts/recreate-docker-server.sh` now creates the derived volume itself, the
+  builder comes back empty, and every base image plus chained handoff re-pulls from
+  the shared registry. Remove the old volume by exact name once the verifier reports
+  it unreferenced.
+- **Adopted copy** (keeps the images, needs the parent container stopped):
+  `docker run --rm -v <old-volume-name>:/from -v peakflow_builder_docker-server_data:/to alpine sh -c 'cp -a /from/. /to/'`,
+  then render and recreate with no pin, and remove `<old-volume-name>` by exact name
+  once the verifier reports it unreferenced.
+
+Then verify on every builder regardless of which option was taken:
 
 ```bash
 docker compose config --quiet
@@ -89,24 +140,24 @@ docker compose config --quiet
 node scripts/verify-dind-data-volume.js
 ```
 
-Because the volume is external, Compose never creates it. A host that has not
-pinned its own volume fails before any container is created — `required variable
-DOCKER_SERVER_DATA_VOLUME is missing a value`, or `volume ... declared as
-external, but could not be found` — so a mis-set builder cannot silently come up
-on an empty data root. A new host creates the volume first:
+### Host rule: never prune the daemon that owns the builder
 
-```bash
-docker volume create peakflow_builder_docker-server_data
-```
+`docker volume prune`, `docker system prune --volumes`, `docker rm -v` and
+`docker compose down -v` must never run against the **host** daemon or the host
+Compose project of a DinD builder. The host daemon is the one that owns the
+builder's `/var/lib/docker` volume, and pruning there deletes the entire nested
+daemon root — images, build cache, nested containers, nested volumes. Pruning inside
+the nested daemon is a different, allowed operation, and `scripts/prune-docker-server.sh`
+is exactly that shape: `docker compose exec docker-server docker system prune -a -f --volumes`
+runs inside the container.
 
-Never reclaim a stranded data volume with `docker volume prune` or
-`docker system prune --volumes`: those act on every unreferenced volume,
-including ones another builder or nested workload still owns. Remove one exact
-volume id, and only after the host mount table, the container mounts, the
-`engine-id` inside the data root, and the newest mtime in it all agree that the
-volume is dead. `scripts/verify-dind-data-volume.js` reports that evidence and
-nothing else: it runs only `docker inspect` and `docker ps`, and refuses any other
-Docker command before it reaches the daemon.
+Never reclaim a stranded data volume with a prune either: a prune acts on every
+unreferenced volume, including ones another builder or nested workload still owns.
+Remove one exact volume name, and only after the host mount table, the container
+mounts, the `engine-id` inside the data root, and the newest mtime in it all agree
+that the volume is dead. `scripts/verify-dind-data-volume.js` reports that evidence
+and nothing else: it runs only `docker inspect` and `docker ps`, and refuses any
+other Docker command before it reaches the daemon.
 
 ## Memory containment
 

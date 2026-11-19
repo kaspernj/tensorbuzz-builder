@@ -5,7 +5,7 @@ import {fileURLToPath} from "node:url"
 
 import {describe, expect, it} from "@velocious/testing"
 
-import {assertReadOnlyDockerCommand} from "../scripts/verify-dind-data-volume.js"
+import {assertReadOnlyDockerCommand, isGeneratedDataVolumeName} from "../scripts/verify-dind-data-volume.js"
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const gibibyte = 1024 ** 3
@@ -16,7 +16,7 @@ const composeFiles = [
 ]
 const emptyEnvFile = path.join(repoRoot, "tests", "fixtures", "empty.env")
 const testComposeProjectName = "tensorbuzz-builder-memory-contract-test"
-const testDinDDataVolumeName = "tensorbuzz-builder-test-dind-data"
+const adoptedDataVolumeName = "builder-ssd-data"
 
 const legacySysctlContent = `# Peakflow builder host tuning for a process-heavy Docker-in-Docker service.
 fs.file-max = 2097152
@@ -58,10 +58,9 @@ function composeTestEnvironment({composeEnvironment = {}, inheritedEnvironment =
     delete env[key]
   }
 
-  env.DOCKER_SERVER_DATA_VOLUME = testDinDDataVolumeName
-
   // A null value in composeEnvironment removes the variable, which is how the
-  // "builder has not pinned its volume" contract is rendered.
+  // "builder sets no data-volume pin" contract is rendered: the Compose default
+  // must then derive the name instead of refusing to render at all.
   for (const [key, value] of Object.entries(composeEnvironment)) {
     if (value === null) {
       delete env[key]
@@ -371,45 +370,98 @@ describe("docker-server memory containment", () => {
 })
 
 describe("docker-server DinD data volume", () => {
-  const existingDataVolumeName = "71d754ae1f0d3b6c9e5a2c8d4b7a6f9e0d1c2b3a4e5f60718293a4b5c6d7e8f9"
-
-  it("mounts the daemon data root through a declared external volume", () => {
-    const config = renderCompose({composeEnvironment: {DOCKER_SERVER_DATA_VOLUME: existingDataVolumeName}})
+  it("mounts the daemon data root through a project-owned named volume", () => {
+    const config = renderCompose()
     const dataMounts = dockerServer(config).volumes.filter((mount) => mount.target === "/var/lib/docker")
 
     expect(dataMounts.length).toBe(1)
     expect(dataMounts[0].type).toBe("volume")
     expect(dataMounts[0].source).toBe("docker-server-data")
-    expect(config.volumes["docker-server-data"].external).toBeTrue()
-    expect(config.volumes["docker-server-data"].name).toBe(existingDataVolumeName)
+    expect(config.volumes["docker-server-data"].external ?? false).toBeFalse()
+    expect(config.volumes["docker-server-data"].name).toBe(`${testComposeProjectName}_docker-server_data`)
   })
 
-  it("inherits the same data volume in Socketduct mode", () => {
-    const config = renderCompose({
-      composeEnvironment: {DOCKER_SERVER_DATA_VOLUME: existingDataVolumeName},
-      socketduct: true
+  it("derives the data volume name from the Compose project identity", () => {
+    const defaultProject = renderCompose({
+      projectDirectory: path.join(repoRoot, "tests", "fixtures"),
+      projectName: null
     })
 
+    expect(defaultProject.name).toBe("peakflow_builder")
+    expect(defaultProject.volumes["docker-server-data"].name).toBe("peakflow_builder_docker-server_data")
+
+    const renamedProject = renderCompose({
+      composeEnvironment: {COMPOSE_PROJECT_NAME: "operator-approved-builder"},
+      projectDirectory: path.join(repoRoot, "tests", "fixtures"),
+      projectName: null
+    })
+
+    expect(renamedProject.volumes["docker-server-data"].name)
+      .toBe("operator-approved-builder_docker-server_data")
+  })
+
+  it("never refuses to boot a builder that sets no data-volume pin", () => {
+    const composeSource = fs.readFileSync(path.join(repoRoot, "docker-compose.yml"), "utf8")
+    const result = renderComposeStatus({composeEnvironment: {DOCKER_SERVER_DATA_VOLUME: null}})
+
+    expect(composeSource).not.toContain(":?")
+    expect(result.status).toBe(0)
+    expect(result.stderr).not.toContain("DOCKER_SERVER_DATA_VOLUME")
+    expect(JSON.parse(result.stdout).volumes["docker-server-data"].name)
+      .toBe(`${testComposeProjectName}_docker-server_data`)
+  })
+
+  it("keeps the adoption override for a host migrating onto the derived name", () => {
+    const config = renderCompose({composeEnvironment: {DOCKER_SERVER_DATA_VOLUME: adoptedDataVolumeName}})
     const dataMounts = dockerServer(config).volumes.filter((mount) => mount.target === "/var/lib/docker")
 
     expect(dataMounts.length).toBe(1)
     expect(dataMounts[0].source).toBe("docker-server-data")
-    expect(config.volumes["docker-server-data"].name).toBe(existingDataVolumeName)
+    expect(config.volumes["docker-server-data"].external ?? false).toBeFalse()
+    expect(config.volumes["docker-server-data"].name).toBe(adoptedDataVolumeName)
   })
 
-  it("refuses to render a second data root when the builder has not pinned its own volume", () => {
-    const result = renderComposeStatus({composeEnvironment: {DOCKER_SERVER_DATA_VOLUME: null}})
+  it("inherits the same data volume in Socketduct mode", () => {
+    const config = renderCompose({socketduct: true})
+    const dataMounts = dockerServer(config).volumes.filter((mount) => mount.target === "/var/lib/docker")
 
-    expect(result.status).toBe(1)
-    expect(result.stderr).toContain("DOCKER_SERVER_DATA_VOLUME")
+    expect(dataMounts.length).toBe(1)
+    expect(dataMounts[0].source).toBe("docker-server-data")
+    expect(config.volumes["docker-server-data"].name).toBe(`${testComposeProjectName}_docker-server_data`)
   })
 
-  it("keeps the checked-in env file renderable for the Compose gate", () => {
-    const assignment = fs.readFileSync(path.join(repoRoot, ".env.example"), "utf8")
-      .match(/^DOCKER_SERVER_DATA_VOLUME=(.+)$/mu)
+  it("leaves the checked-in env file unpinned so the derived name is the fleet default", () => {
+    const envFile = fs.readFileSync(path.join(repoRoot, ".env.example"), "utf8")
 
-    expect(assignment === null).toBeFalse()
-    expect(assignment[1]).toBe("peakflow_builder_docker-server_data")
+    expect(envFile).not.toMatch(/^DOCKER_SERVER_DATA_VOLUME=/mu)
+  })
+
+  it("names host-daemon pruning as forbidden on a DinD builder", () => {
+    const readme = fs.readFileSync(path.join(repoRoot, "README.md"), "utf8")
+    const compatibility = fs.readFileSync(
+      path.join(repoRoot, "docs", "naming-and-runtime-compatibility.md"),
+      "utf8"
+    )
+
+    for (const documentation of [readme, compatibility]) {
+      for (const forbidden of ["docker system prune", "docker volume prune", "docker rm -v", "down -v"]) {
+        expect(documentation).toContain(forbidden)
+      }
+    }
+
+    expect(readme).toContain("docker compose exec docker-server docker system prune")
+
+    const pruneScript = fs.readFileSync(path.join(repoRoot, "scripts", "prune-docker-server.sh"), "utf8")
+
+    expect(pruneScript).toContain("docker compose exec docker-server")
+    expect(pruneScript).not.toMatch(/^docker (system|volume) prune/mu)
+  })
+
+  it("flags a data volume pinned to a generated volume id", () => {
+    expect(isGeneratedDataVolumeName("5d44a6d61021bc41de3663a3fdb8fd996efb9a060e9aee79a90d92e4b6d5c480"))
+      .toBeTrue()
+    expect(isGeneratedDataVolumeName("peakflow_builder_docker-server_data")).toBeFalse()
+    expect(isGeneratedDataVolumeName(adoptedDataVolumeName)).toBeFalse()
   })
 
   it("keeps data-volume verification read-only", () => {

@@ -33,6 +33,16 @@ export function assertReadOnlyDockerCommand(args) {
   }
 }
 
+// A 64-hex name is a Docker-generated anonymous volume id. Those ids are not a
+// contract: a host-daemon prune can delete one, and a builder whose .env pins it
+// then fails before any container is created. The Compose default derives a
+// human-stable name instead, so this shape is reported, never required.
+const generatedVolumeNamePattern = /^[0-9a-f]{64}$/u
+
+export function isGeneratedDataVolumeName(volumeName) {
+  return generatedVolumeNamePattern.test(volumeName)
+}
+
 function dockerText(args) {
   assertReadOnlyDockerCommand(args)
 
@@ -96,6 +106,13 @@ function main() {
   }
 
   console.log(`Data volume owned by ${containerName}: ${ownedVolume}`)
+
+  if (isGeneratedDataVolumeName(ownedVolume)) {
+    console.log(
+      `Warning: ${ownedVolume} is a generated anonymous volume id. Repoint this ` +
+      "builder at the derived name <project>_docker-server_data and drop the pin."
+    )
+  }
 
   if (!fs.existsSync(dataRoot) || !fs.statSync(dataRoot).isDirectory()) {
     console.error(`Data root ${dataRoot} is not readable here; run this as root on the builder host.`)
